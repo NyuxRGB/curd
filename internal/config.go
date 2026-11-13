@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	// "io"
 	"net/http"
@@ -38,55 +39,118 @@ type AnilistToken struct {
 
 // CurdConfig struct with field names that match the config keys
 type CurdConfig struct {
-	Player                   string   `config:"Player"`
-	MpvArgs                  []string `config:MpvArgs`
-	SubsLanguage             string   `config:"SubsLanguage"`
-	SubOrDub                 string   `config:"SubOrDub"`
-	StoragePath              string   `config:"StoragePath"`
-	AnimeNameLanguage        string   `config:"AnimeNameLanguage"`
-	MenuOrder                string   `config:"MenuOrder"`
-	PercentageToMarkComplete int      `config:"PercentageToMarkComplete"`
-	NextEpisodePrompt        bool     `config:"NextEpisodePrompt"`
-	SkipOp                   bool     `config:"SkipOp"`
-	SkipEd                   bool     `config:"SkipEd"`
-	SkipFiller               bool     `config:"SkipFiller"`
-	ImagePreview             bool     `config:"ImagePreview"`
-	SkipRecap                bool     `config:"SkipRecap"`
-	RofiSelection            bool     `config:"RofiSelection"`
-	CurrentCategory          bool     `config:"CurrentCategory"`
-	ScoreOnCompletion        bool     `config:"ScoreOnCompletion"`
-	SaveMpvSpeed             bool     `config:"SaveMpvSpeed"`
-	AddMissingOptions        bool     `config:"AddMissingOptions"`
-	AlternateScreen          bool     `config:"AlternateScreen"`
-	DiscordPresence          bool     `config:"DiscordPresence"`
-	DiscordClientId          string   `config:"DiscordClientId"`
+	Player                     string   `config:"Player"`
+	MpvArgs                    []string `config:"MpvArgs"`
+	MpvPlaybackStartTimeout    int      `config:"MpvPlaybackStartTimeout"`
+	SubsLanguage               string   `config:"SubsLanguage"`
+	SubOrDub                   string   `config:"SubOrDub"`
+	SubStyle                   string   `config:"SubStyle"`
+	StoragePath                string   `config:"StoragePath"`
+	AnimeNameLanguage          string   `config:"AnimeNameLanguage"`
+	MenuOrder                  string   `config:"MenuOrder"`
+	PercentageToMarkComplete   int      `config:"PercentageToMarkComplete"`
+	NextEpisodePrompt          bool     `config:"NextEpisodePrompt"`
+	SkipOp                     bool     `config:"SkipOp"`
+	SkipEd                     bool     `config:"SkipEd"`
+	SkipFiller                 bool     `config:"SkipFiller"`
+	ImagePreview               bool     `config:"ImagePreview"`
+	SkipRecap                  bool     `config:"SkipRecap"`
+	RofiSelection              bool     `config:"RofiSelection"`
+	CurrentCategory            bool     `config:"CurrentCategory"`
+	ScoreOnCompletion          bool     `config:"ScoreOnCompletion"`
+	SaveMpvSpeed               bool     `config:"SaveMpvSpeed"`
+	AddMissingOptions          bool     `config:"AddMissingOptions"`
+	AlternateScreen            bool     `config:"AlternateScreen"`
+	DiscordPresence            bool     `config:"DiscordPresence"`
+	DiscordClientId            string   `config:"DiscordClientId"`
+	VimKeys                    bool     `config:"VimKeys"`
+	CheckUpdates               bool     `config:"CheckUpdates"`
+	MpvEpisodePlaylist         bool     `config:"MpvEpisodePlaylist"`
+	Provider                   string   `config:"Provider"`
+	DisabledProviders          string   `config:"DisabledProviders"`
+	ManualProviderSearch       bool     `config:"ManualProviderSearch"`
+	TrackingLocal              bool     `config:"TrackingLocal"`
+	TrackingRemote             string   `config:"TrackingRemote"`
+	TrackingConfigured         bool     `config:"TrackingConfigured"`
+	MyAnimeListClientID        string   `config:"MyAnimeListClientID"`
+	MyAnimeListClientSecret    string   `config:"MyAnimeListClientSecret"`
+	MyAnimeListImported        bool     `config:"MyAnimeListImported"`
+	MyAnimeListImportDismissed bool     `config:"MyAnimeListImportDismissed"`
+	ShowNewEpisodes            bool     `config:"ShowNewEpisodes"`
+}
+
+const (
+	DefaultMpvPlaybackStartTimeout = 20
+	maxMpvPlaybackStartTimeout     = 600
+)
+
+func MpvPlaybackStartTimeoutDuration(config *CurdConfig) time.Duration {
+	seconds := DefaultMpvPlaybackStartTimeout
+	if config != nil && config.MpvPlaybackStartTimeout > 0 {
+		seconds = config.MpvPlaybackStartTimeout
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func GetStoragePath() string {
+	if globalConfig != nil && globalConfig.StoragePath != "" {
+		return os.ExpandEnv(globalConfig.StoragePath)
+	}
+	return filepath.Join(os.ExpandEnv("$HOME"), ".local", "share", "curd")
 }
 
 // Default configuration values as a map
 func defaultConfigMap() map[string]string {
 	return map[string]string{
-		"Player":                   "mpv",
-		"MpvArgs":                  "[]",
-		"StoragePath":              "$HOME/.local/share/curd",
-		"AnimeNameLanguage":        "english",
-		"SubsLanguage":             "english",
-		"MenuOrder":                "CURRENT,ALL,UNTRACKED,UPDATE,CONTINUE_LAST",
-		"SubOrDub":                 "sub",
-		"PercentageToMarkComplete": "85",
-		"NextEpisodePrompt":        "false",
-		"SkipOp":                   "true",
-		"SkipEd":                   "true",
-		"SkipFiller":               "true",
-		"SkipRecap":                "true",
-		"RofiSelection":            "false",
-		"ImagePreview":             "false",
-		"ScoreOnCompletion":        "true",
-		"SaveMpvSpeed":             "true",
-		"AddMissingOptions":        "true",
-		"AlternateScreen":          "true",
-		"DiscordPresence":          "true",
-		"DiscordClientId":          "1287457464148820089",
+		"Player":                     "mpv",
+		"MpvArgs":                    "[]",
+		"MpvPlaybackStartTimeout":    "20",
+		"StoragePath":                "$HOME/.local/share/curd",
+		"AnimeNameLanguage":          "english",
+		"SubsLanguage":               "english",
+		"MenuOrder":                  "CURRENT,ALL,UNTRACKED,UPDATE,REMAP_PROVIDER,CONTINUE_LAST,TRACKER,PROVIDER",
+		"SubOrDub":                   "sub",
+		"SubStyle":                   "ask",
+		"PercentageToMarkComplete":   "85",
+		"NextEpisodePrompt":          "false",
+		"SkipOp":                     "true",
+		"SkipEd":                     "true",
+		"SkipFiller":                 "true",
+		"SkipRecap":                  "true",
+		"RofiSelection":              "false",
+		"ImagePreview":               "false",
+		"ScoreOnCompletion":          "true",
+		"SaveMpvSpeed":               "true",
+		"AddMissingOptions":          "true",
+		"AlternateScreen":            "true",
+		"DiscordPresence":            "true",
+		"DiscordClientId":            "1287457464148820089",
+		"VimKeys":                    "false",
+		"CheckUpdates":               "true",
+		"MpvEpisodePlaylist":         "true",
+		"Provider":                   "stacked",
+		"DisabledProviders":          "[]",
+		"ManualProviderSearch":       "false",
+		"TrackingLocal":              "true",
+		"TrackingRemote":             "anilist",
+		"TrackingConfigured":         "false",
+		"MyAnimeListClientID":        "f76d4c827152327b60654285d221222c",
+		"MyAnimeListClientSecret":    "",
+		"MyAnimeListImported":        "false",
+		"MyAnimeListImportDismissed": "false",
+		"ShowNewEpisodes":            "true",
 	}
+}
+
+// VimKeysEnabled reports whether selection menus should use vim-style motions.
+func VimKeysEnabled(config *CurdConfig) bool {
+	if config != nil {
+		return config.VimKeys
+	}
+	if globalConfig != nil {
+		return globalConfig.VimKeys
+	}
+	return false
 }
 
 var globalConfig *CurdConfig
@@ -99,8 +163,25 @@ func GetGlobalConfig() *CurdConfig {
 	return globalConfig
 }
 
+func useEnglishAnimeNames(config *CurdConfig) bool {
+	return config == nil || strings.EqualFold(strings.TrimSpace(config.AnimeNameLanguage), "english")
+}
+
 // Helper function to parse string array from config
 func parseStringArray(value string) []string {
+	value = strings.TrimSpace(value)
+	var parsed []string
+	if err := json.Unmarshal([]byte(value), &parsed); err == nil {
+		result := make([]string, 0, len(parsed))
+		for _, part := range parsed {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				result = append(result, part)
+			}
+		}
+		return result
+	}
+
 	// Remove brackets and split by comma
 	value = strings.TrimPrefix(value, "[")
 	value = strings.TrimSuffix(value, "]")
@@ -122,9 +203,32 @@ func parseStringArray(value string) []string {
 	return result
 }
 
+var GlobalConfigPath string
+
+func persistSubStylePreference(style string) error {
+	style = strings.ToLower(strings.TrimSpace(style))
+	if style != "soft" && style != "hard" {
+		return nil
+	}
+	if cfg := GetGlobalConfig(); cfg != nil {
+		cfg.SubStyle = style
+	}
+	if strings.TrimSpace(GlobalConfigPath) == "" {
+		return nil
+	}
+	configMap, err := LoadConfigFromFile(GlobalConfigPath)
+	if err != nil {
+		return err
+	}
+	configMap["SubStyle"] = style
+	return SaveConfigToFile(GlobalConfigPath, configMap)
+}
+
 // LoadConfig reads or creates the config file, adds missing fields, and returns the populated CurdConfig struct
 func LoadConfig(configPath string) (CurdConfig, error) {
 	configPath = os.ExpandEnv(configPath) // Substitute environment variables like $HOME
+	GlobalConfigPath = configPath
+	createdConfig := false
 
 	// Check if config file exists
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -133,6 +237,7 @@ func LoadConfig(configPath string) (CurdConfig, error) {
 		if err := createDefaultConfig(configPath); err != nil {
 			return CurdConfig{}, fmt.Errorf("error creating default config file: %v", err)
 		}
+		createdConfig = true
 	}
 
 	// Load the config from file
@@ -144,33 +249,64 @@ func LoadConfig(configPath string) (CurdConfig, error) {
 	// Check AddMissingOptions setting first
 	addMissing := true
 	if val, exists := configMap["AddMissingOptions"]; exists {
-		addMissing, _ = strconv.ParseBool(val)
+		if parsed, parseErr := strconv.ParseBool(val); parseErr == nil {
+			addMissing = parsed
+		}
 	}
 
-	// Add missing fields to the config map
+	_, hadTrackingRemote := configMap["TrackingRemote"]
+	_, hadTrackingConfigured := configMap["TrackingConfigured"]
+	legacyConfig := !createdConfig && !hadTrackingRemote && !hadTrackingConfigured
+
+	// fileMap = keys actually present on disk.
+	// workMap = file keys + in-memory defaults for PopulateConfig.
+	fileMap := configMap
+	workMap := make(map[string]string, len(fileMap)+len(defaultConfigMap()))
+	for key, value := range fileMap {
+		workMap[key] = value
+	}
+	for key, defaultValue := range defaultConfigMap() {
+		if _, exists := workMap[key]; !exists {
+			workMap[key] = defaultValue
+		}
+	}
+
+	// One-time legacy tracking migration: only touch tracking keys on disk.
 	updated := false
-	defaultConfigMap := defaultConfigMap()
-	for key, defaultValue := range defaultConfigMap {
-		if _, exists := configMap[key]; !exists {
-			configMap[key] = defaultValue
+	if legacyConfig {
+		fileMap["TrackingLocal"] = "true"
+		fileMap["TrackingRemote"] = TrackingRemoteAniList
+		fileMap["TrackingConfigured"] = "true"
+		workMap["TrackingLocal"] = "true"
+		workMap["TrackingRemote"] = TrackingRemoteAniList
+		workMap["TrackingConfigured"] = "true"
+		updated = true
+	}
+
+	if providerValue, exists := fileMap["Provider"]; exists {
+		normalizedProviderValue := canonicalProviderConfigValue(providerValue)
+		if normalizedProviderValue != providerValue {
+			fileMap["Provider"] = normalizedProviderValue
+			workMap["Provider"] = normalizedProviderValue
 			updated = true
 		}
 	}
 
-	// Write updated config back to file only if AddMissingOptions is true
+	// New config keys are NOT bulk-appended here. Only MigrateOnVersionUpgrade
+	// injects options registered in configOptionsIntroducedInVersion() for the
+	// versions the user actually crossed — so sparse configs never get every
+	// historical default dumped in on a normal launch.
+
+	// Persist legacy tracking / provider-token normalize (rewrite only those cases).
 	if addMissing && updated {
-		if err := SaveConfigToFile(configPath, configMap); err != nil {
+		if err := SaveConfigToFile(configPath, fileMap); err != nil {
 			return CurdConfig{}, fmt.Errorf("error saving updated config file: %v", err)
 		}
 	}
 
-	// Parse string arrays
-	if mpvArgs, exists := configMap["MpvArgs"]; exists {
-		configMap["MpvArgs"] = mpvArgs
-	}
-
-	// Populate the CurdConfig struct from the config map
-	config := PopulateConfig(configMap)
+	// Populate the CurdConfig struct from the complete (in-memory) work map
+	config := PopulateConfig(workMap)
+	normalizeTrackingConfig(&config)
 
 	return config, nil
 }
@@ -182,7 +318,7 @@ func createDefaultConfig(path string) error {
 
 	// Ensure the directory exists
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("error creating directory: %v", err)
 	}
 
@@ -284,7 +420,7 @@ func authenticateWithBrowser(tokenPath string) (string, error) {
 				"code":          {code},
 			}
 
-			resp, err := http.PostForm(tokenURL, data)
+			resp, err := sharedHTTPClient.PostForm(tokenURL, data)
 			if err != nil {
 				errCh <- fmt.Errorf("failed to exchange code for token: %w", err)
 				return
@@ -403,7 +539,7 @@ func loadToken(tokenPath string) (*AnilistToken, error) {
 // saveToken saves the token to the token file
 func saveToken(tokenPath string, token *AnilistToken) error {
 	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -412,7 +548,7 @@ func saveToken(tokenPath string, token *AnilistToken) error {
 		return fmt.Errorf("failed to marshal token: %w", err)
 	}
 
-	return os.WriteFile(tokenPath, data, 0600)
+	return os.WriteFile(tokenPath, data, 0o600)
 }
 
 // isTokenValid checks if the token is still valid
@@ -453,7 +589,6 @@ func ChangeToken(config *CurdConfig, user *User) {
 	// Try browser-based OAuth first
 	fmt.Println("Starting browser-based authentication...")
 	user.Token, err = authenticateWithBrowser(tokenPath)
-
 	if err != nil {
 		Log("Browser authentication failed: " + err.Error())
 		fmt.Printf("Browser authentication failed: %v\n", err)
@@ -528,9 +663,15 @@ func SaveConfigToFile(path string, configMap map[string]string) error {
 	}
 	defer file.Close()
 
+	keys := make([]string, 0, len(configMap))
+	for key := range configMap {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
 	writer := bufio.NewWriter(file)
-	for key, value := range configMap {
-		line := fmt.Sprintf("%s=%s\n", key, value)
+	for _, key := range keys {
+		line := fmt.Sprintf("%s=%s\n", key, configMap[key])
 		if _, err := writer.WriteString(line); err != nil {
 			return err
 		}
@@ -542,25 +683,34 @@ func SaveConfigToFile(path string, configMap map[string]string) error {
 func PopulateConfig(configMap map[string]string) CurdConfig {
 	config := CurdConfig{}
 	configValue := reflect.ValueOf(&config).Elem()
+	defaults := defaultConfigMap()
 
 	for i := 0; i < configValue.NumField(); i++ {
 		field := configValue.Type().Field(i)
 		tag := field.Tag.Get("config")
 
-		if value, exists := configMap[tag]; exists {
-			fieldValue := configValue.FieldByName(field.Name)
+		value, exists := configMap[tag]
+		if !exists || value == "" {
+			value = defaults[tag]
+		}
+		fieldValue := configValue.FieldByName(field.Name)
 
-			if fieldValue.CanSet() {
-				switch fieldValue.Kind() {
-				case reflect.String:
-					fieldValue.SetString(value)
-				case reflect.Int:
-					intVal, _ := strconv.Atoi(value)
-					fieldValue.SetInt(int64(intVal))
-				case reflect.Bool:
-					boolVal, _ := strconv.ParseBool(value)
-					fieldValue.SetBool(boolVal)
+		if fieldValue.CanSet() {
+			switch fieldValue.Kind() {
+			case reflect.String:
+				fieldValue.SetString(value)
+			case reflect.Int:
+				intVal, err := strconv.Atoi(value)
+				if err != nil {
+					intVal, _ = strconv.Atoi(defaults[tag])
 				}
+				fieldValue.SetInt(int64(intVal))
+			case reflect.Bool:
+				boolVal, err := strconv.ParseBool(value)
+				if err != nil {
+					boolVal, _ = strconv.ParseBool(defaults[tag])
+				}
+				fieldValue.SetBool(boolVal)
 			}
 		}
 	}
@@ -570,23 +720,69 @@ func PopulateConfig(configMap map[string]string) CurdConfig {
 		config.MpvArgs = parseStringArray(mpvArgs)
 	}
 
+	// Validate PercentageToMarkComplete range (0-100)
+	if config.PercentageToMarkComplete < 0 {
+		config.PercentageToMarkComplete = 0
+	} else if config.PercentageToMarkComplete > 100 {
+		config.PercentageToMarkComplete = 100
+	}
+
+	if config.MpvPlaybackStartTimeout <= 0 {
+		config.MpvPlaybackStartTimeout = DefaultMpvPlaybackStartTimeout
+	} else if config.MpvPlaybackStartTimeout > maxMpvPlaybackStartTimeout {
+		config.MpvPlaybackStartTimeout = maxMpvPlaybackStartTimeout
+	}
+
 	return config
+}
+
+func normalizeRemoteTracker(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "none", "disabled", "off", "local":
+		return TrackingRemoteNone
+	case "anilist", "ani-list":
+		return TrackingRemoteAniList
+	case "myanimelist", "my_anime_list", "my-anime-list", "mal":
+		return TrackingRemoteMyAnimeList
+	case "anilist+myanimelist", "anilist,myanimelist", "myanimelist+anilist", "myanimelist,anilist", "both", "dual":
+		return TrackingRemoteBoth
+	default:
+		return ""
+	}
+}
+
+func normalizeTrackingConfig(config *CurdConfig) {
+	if config == nil {
+		return
+	}
+
+	remote := normalizeRemoteTracker(config.TrackingRemote)
+	if remote == "" {
+		config.TrackingConfigured = false
+		remote = TrackingRemoteAniList
+	}
+
+	config.TrackingRemote = remote
+	config.TrackingLocal = true
 }
 
 func getOrderedCategories(userCurdConfig *CurdConfig) []SelectionOption {
 	// Define the default categories and all available labels
-	defaultOrder := []string{"CURRENT", "ALL", "UNTRACKED", "UPDATE", "CONTINUE_LAST"}
+	defaultOrder := []string{"CURRENT", "ALL", "UNTRACKED", "UPDATE", "REMAP_PROVIDER", "CONTINUE_LAST", "TRACKER", "PROVIDER"}
 	availableLabels := map[string]string{
-		"CURRENT":       "Currently Watching",
-		"ALL":           "Show All",
-		"UNTRACKED":     "Untracked Watching",
-		"UPDATE":        "Update (Episode, Status, Score)",
-		"CONTINUE_LAST": "Continue Last Session",
-		"PLANNING":      "Plan to Watch",
-		"COMPLETED":     "Completed",
-		"PAUSED":        "Paused",
-		"DROPPED":       "Dropped",
-		"REWATCHING":    "Rewatching",
+		"CURRENT":        "Currently Watching",
+		"ALL":            "Show All",
+		"UNTRACKED":      "Untracked Watching",
+		"UPDATE":         "Update (Episode, Status, Score)",
+		"REMAP_PROVIDER": "Remap Provider",
+		"CONTINUE_LAST":  "Continue Last Session",
+		"PLANNING":       "Plan to Watch",
+		"COMPLETED":      "Completed",
+		"PAUSED":         "Paused",
+		"DROPPED":        "Dropped",
+		"REWATCHING":     "Rewatching",
+		"TRACKER":        "Change Tracker",
+		"PROVIDER":       "Change Provider",
 	}
 
 	// Create ordered list to store final result
@@ -609,8 +805,14 @@ func getOrderedCategories(userCurdConfig *CurdConfig) []SelectionOption {
 	}
 
 	// Create the final ordered slice of SelectionOptions
+	if !seen["TRACKER"] {
+		finalOrder = append(finalOrder, "TRACKER")
+	}
 	orderedCategories := make([]SelectionOption, 0, len(finalOrder))
 	for _, key := range finalOrder {
+		if !trackingCategoryEnabled(userCurdConfig, key) {
+			continue
+		}
 		orderedCategories = append(orderedCategories, SelectionOption{
 			Key:   key,
 			Label: availableLabels[key],

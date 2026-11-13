@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // GetEpisodeData fetches episode data for a given anime ID and episode number
@@ -80,7 +81,10 @@ func makeGetRequest(url string, headers map[string]string) (map[string]interface
 		req.Header.Set(key, value)
 	}
 
-	client := &http.Client{}
+	client := sharedHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send GET request: %w", err)
@@ -140,4 +144,43 @@ func FetchJikanPictures(malID int) ([]string, error) {
 	}
 
 	return urls, nil
+}
+
+type JikanAnimeData struct {
+	MalID         int     `json:"mal_id"`
+	Title         string  `json:"title"`
+	TitleEnglish  string  `json:"title_english"`
+	TitleJapanese string  `json:"title_japanese"`
+	Type          string  `json:"type"`
+	Episodes      int     `json:"episodes"`
+	Status        string  `json:"status"`
+	Score         float64 `json:"score"`
+	Season        string  `json:"season"`
+	Year          int     `json:"year"`
+}
+
+func FetchJikanAnimeData(malID int) (*JikanAnimeData, error) {
+	url := fmt.Sprintf("https://api.jikan.moe/v4/anime/%d", malID)
+	response, err := makeGetRequest(url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("Jikan API request failed: %v", err)
+	}
+
+	dataMap, ok := response["data"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid Jikan API response format")
+	}
+
+	dataBytes, err := json.Marshal(dataMap)
+	if err != nil {
+		return nil, err
+	}
+
+	var data JikanAnimeData
+	err = json.Unmarshal(dataBytes, &data)
+	if err != nil {
+		return nil, err
+	}
+
+	return &data, nil
 }

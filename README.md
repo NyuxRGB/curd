@@ -1,11 +1,15 @@
 # Curd
 
 A cli application to stream anime with [Anilist](https://anilist.co/) integration and Discord RPC written in golang.
-Works on Windows and Linux
+Works on Linux, MacOS and Windows.
 
 ## Join the discord server
 
 https://discord.gg/rrpBfu2gHq
+
+## Join the Matrix server
+
+https://matrix.to/#/#curd:matrix.org
 
 ## Demo Video
 Normal mode:
@@ -20,8 +24,11 @@ https://github.com/user-attachments/assets/cbf799bc-9fdd-4402-ab61-b4e31f1e264d
 
 
 ## Features
+- Multiple Content Providers (Senshi, AniNeko, AllAnime, and Animepahe) with ordered fallback and up to 1080p support
+- Built-in headless browser to bypass Cloudflare/DDoS-Guard protections
 - Stream anime online
-- Update anime in Anilist after completion
+- Track anime locally, on AniList, or on MyAnimeList
+- Browser-based AniList and MyAnimeList login flows
 - Skip anime Intro and Outro
 - Skip Filler and Recap episodes
 - Discord RPC about the anime
@@ -145,7 +152,40 @@ curd
 </details>
 
 <details>
-<summary>macOS Installation</summary>
+<summary>Generic Installation</summary>
+
+Choose the appropriate binary for your system:
+```bash
+# For Linux x86_64:
+curl -Lo curd https://github.com/Wraient/curd/releases/latest/download/curd-linux-x86_64
+
+# For Linux ARM64:
+curl -Lo curd https://github.com/Wraient/curd/releases/latest/download/curd-linux-arm64
+
+chmod +x curd
+sudo mv curd /usr/bin/
+curd
+```
+</details>
+
+<details>
+<summary>Uninstallation</summary>
+
+```bash
+sudo rm /usr/bin/curd
+```
+
+For AUR-based distributions:
+
+```bash
+yay -R curd
+```
+</details>
+
+### MacOS
+
+<details>
+<summary>MacOS Installation</summary>
 
 Install required dependencies
 ```bash
@@ -180,6 +220,17 @@ curd
 </details>
 
 <details>
+<summary>Uninstallation</summary>
+
+```bash
+sudo rm /usr/local/bin/curd
+```
+
+</details>
+
+### Windows
+
+<details>
 <summary>Windows Installation</summary>
 
 Option 1: Using the installer
@@ -188,42 +239,6 @@ Option 1: Using the installer
 Option 2: Standalone executable
 - Download [curd-windows-x86_64.exe](https://github.com/Wraient/curd/releases/latest/download/curd-windows-x86_64.exe)
 </details>
-
-<details>
-<summary>Generic Installation</summary>
-
-Choose the appropriate binary for your system:
-```bash
-# For Linux x86_64:
-curl -Lo curd https://github.com/Wraient/curd/releases/latest/download/curd-linux-x86_64
-
-# For Linux ARM64:
-curl -Lo curd https://github.com/Wraient/curd/releases/latest/download/curd-linux-arm64
-
-# For macOS Universal:
-curl -Lo curd https://github.com/Wraient/curd/releases/latest/download/curd-macos-universal
-
-chmod +x curd
-sudo mv curd /usr/bin/
-curd
-```
-</details>
-
-<details>
-<summary>Uninstallation</summary>
-
-```bash
-sudo rm /usr/bin/curd
-```
-
-For AUR-based distributions:
-
-```bash
-yay -R curd
-```
-</details>
-
-### [Windows Installer](https://github.com/Wraient/curd/releases/latest/download/curd-windows-installer.exe)
 
 ## Data Storage
 
@@ -284,6 +299,8 @@ curd [options]
 | `-change-token`           | Change your authentication token                                       | -             |
 | `-dub`                    | Watch the dubbed version of the anime                                  | -             |
 | `-sub`                    | Watch the subbed version of the anime                                  | -             |
+| `-softsub`                | Prefer soft subtitles when available (AniNeko)                         | -             |
+| `-hardsub`                | Prefer hard subtitles when available (AniNeko)                         | -             |
 | `-new`                    | Add a new anime to your list                                           | -             |
 | `-e`                      | Edit the configuration file                                            | -             |
 | `-skip-op`                | Automatically skip the opening section of each episode                 | `true`        |
@@ -337,17 +354,40 @@ You can quit it anytime and the resume time would be saved in the history file
 more settings can be found at config file.
 config file is located at ```~/.config/curd/curd.conf```
 
+On first start, curd asks which tracking mode you want to use:
+
+- local
+- anilist
+- myanimelist
+- anilist + myanimelist
+
+Local history stays enabled in all modes. `anilist` means local history + AniList sync, `myanimelist` means local history + MyAnimeList sync, and `anilist + myanimelist` updates both platforms. In dual-sync mode, curd compares the latest remote update time for each anime and pushes the newest status/progress/category back to the older tracker so both sides converge automatically. Legacy installs are migrated to `anilist` automatically. If you switch trackers later, curd exposes a **Change Tracker** menu entry and can either merge both lists, replace MyAnimeList with AniList, or replace AniList with MyAnimeList.
+
+MyAnimeList OAuth requires your own MAL application credentials. You can set them in the config file or with environment variables:
+
+```bash
+CURD_MAL_CLIENT_ID=your_client_id
+CURD_MAL_CLIENT_SECRET=your_client_secret
+```
+
+If the browser reaches the localhost callback page but curd does not continue automatically, rerun the command and paste the full callback URL when prompted. Curd now keeps the pending MyAnimeList PKCE state so the login can be completed manually.
+
 | **Option**               | **Type**   | **Valid Values**                           | **Description**                                                                                   |
 |---------------------------|------------|-------------------------------------------|---------------------------------------------------------------------------------------------------|
 | `DiscordPresence`         | Boolean    | `true`, `false`                           | Enables or disables Discord Rich Presence integration.                                            |
 | `AnimeNameLanguage`       | Enum       | `english`, `romaji`                       | Sets the preferred language for anime names.                                                      |
 | `MpvArgs`                 | List       | all mpv args eg ["--fullscreen=yes", "--mute=yes"]     | Add args to mpv player                                                               | 
-| `AddMissingOptions`       | Boolean    | `true`, `false`                           | Automatically adds missing configuration options with default values to the config file.          |
+| `MpvPlaybackStartTimeout` | Integer    | `1` to `600` (seconds)                    | How long to wait for MPV playback to start before trying another provider. Default: `20`          |
+| `AddMissingOptions`       | Boolean    | `true`, `false`                           | When `true`, on a **version upgrade** only options registered as new for that release are **appended** to `curd.conf` (not every historical default). Set `false` to opt out. Defaults still apply in memory always. |
+| `VimKeys`                 | Boolean    | `true`, `false`                           | When `true`, selection menus use vim motions: `j`/`k`/`h`/`l` (and arrows) to move, `/` or `?` to search. Default: `false` (type-to-filter immediately). Add `VimKeys=true` to `~/.config/curd/curd.conf` to enable. |
+| `CheckUpdates`            | Boolean    | `true`, `false`                           | When `true` (default), checks GitHub for a newer release **while idle** (does not delay startup). If an update is found, the next launch shows notes and options: update now / skip / remind later / turn off. |
+| `MpvEpisodePlaylist`    | Boolean    | `true`, `false`                           | When `true` (default), after playback is stable curd fills the MPV playlist with episodes (and dub/sub when available) so you can pick from MPV's playlist UI. Access: `MPV` → right-click the prev/next OSC button (or `Ctrl+P`). Selecting a row loads that stream and keeps tracking in sync. |
 | `AlternateScreen`         | Boolean    | `true`, `false`                           | Toggles the use of an alternate screen buffer for cleaner UI.                                     |
 | `RofiSelection`           | Boolean    | `true`, `false`                           | Enables or disables anime selection via Rofi.                                                     |
 | `PercentageToMarkComplete`| Integer    | `0` to `100`                              | Sets the percentage of an episode watched to consider it as completed.                            |
 | `StoragePath`             | String     | Any valid path (Environment variables accepted)  | Specifies the directory where Curd stores its data.                                        |
 | `SubOrDub`                | Enum       | `sub`, `dub`                              | Sets the preferred format for anime audio.                                                        |
+| `SubStyle`                | Enum       | `ask`, `soft`, `hard`                     | For AniNeko sub streams: `ask` prompts once when both soft-sub and hard-sub servers exist, then saves your choice here; `soft` uses external `.vtt` subtitles via mpv; `hard` uses burned-in subs. Default: `ask` |
 | `NextEpisodePrompt`       | Boolean    | `true`, `false`                           | Prompts the user before automatically playing the next episode.                                   |
 | `SubsLanguage`            | String     | `english` (redundant rn)                  | Sets the preferred subtitle language.                                                             |
 | `ScoreOnCompletion`       | Boolean    | `true`, `false`                           | Automatically prompts the user to rate the anime upon completion.                                 |
@@ -358,7 +398,15 @@ config file is located at ```~/.config/curd/curd.conf```
 | `Player`                  | String     | any mpv-compatible binary (e.g. `mpv`, `iina`) | Player binary used for playback. If not found, Curd falls back to `mpv`.                          |
 | `SaveMpvSpeed`            | Boolean    | `true`, `false`                           | Retains the playback speed set in MPV for next episode.                                           |
 | `SkipFiller`              | Boolean    | `true`, `false`                           | Skips filler episodes when supported.                                                             |
-| `MenuOrder`               | String     | Comma-separated list                      | Controls which menu items appear and their order. Available options: `CURRENT`, `ALL`, `UNTRACKED`, `UPDATE`, `CONTINUE_LAST`, `PLANNING`, `COMPLETED`, `PAUSED`, `DROPPED`, `REWATCHING`. Only listed items will be shown. Default: `CURRENT,ALL,UNTRACKED,UPDATE,CONTINUE_LAST` |
+| `MenuOrder`               | String     | Comma-separated list                      | Controls which menu items appear and their order. Available options: `CURRENT`, `ALL`, `UNTRACKED`, `UPDATE`, `REMAP_PROVIDER`, `CONTINUE_LAST`, `PLANNING`, `COMPLETED`, `PAUSED`, `DROPPED`, `REWATCHING`, `TRACKER`, `PROVIDER`. Only listed items will be shown. Default: `CURRENT,ALL,UNTRACKED,UPDATE,REMAP_PROVIDER,CONTINUE_LAST,TRACKER,PROVIDER` |
+| `Provider`                | List       | `stacked`, `["anipub"]`, `["anineko"]`, `["allanime"]`, `["animepahe"]` | Sets the content-provider fallback list. `stacked` (default) uses the preferred order: senshi → anipub. anineko, allanime and animepahe are disabled by default (site down / anti-bot / Cloudflare) unless included in `Provider`. Default: `stacked` |
+| `ManualProviderSearch`    | Boolean    | `true`, `false`                           | Skip automatic provider matching and always show provider search results for manual selection. Displays a hint with the tracker title, format (TV/Movie/etc.), episode count, and sub/dub mode. Default: `false` |
+| `TrackingLocal`           | Boolean    | `true`                                    | Legacy compatibility flag. Local playback history is always enabled.                              |
+| `TrackingRemote`          | Enum       | `none`, `anilist`, `myanimelist`, `anilist+myanimelist` | Selects which remote tracker curd syncs with.                                           |
+| `TrackingConfigured`      | Boolean    | `true`, `false`                           | Internal flag used to remember that the startup tracking prompt has already been completed.       |
+| `MyAnimeListClientID`     | String     | MAL OAuth client ID                       | Client ID used for MyAnimeList browser login.                                                     |
+| `MyAnimeListClientSecret` | String     | MAL OAuth client secret                   | Optional secret used for MyAnimeList browser login and token refresh.                             |
+| `MyAnimeListImported`     | Boolean    | `true`, `false`                           | Tracks whether the one-time AniList-to-MyAnimeList import prompt has already been handled.        |
 
 ## Todo (fix)
 - Use Powershell for windows token input instead of notepad or cmd
@@ -369,11 +417,17 @@ config file is located at ```~/.config/curd/curd.conf```
 - iina - Optional mpv-based player on macOS
 - rofi - Selection menu
 - ueberzug - Display images in rofi
-    
+- chromium - Required for Animepahe (auto-downloaded by default, but Termux users must install manually via `pkg install chromium`)
+
 ## API Used
 - [Anilist API](https://anilist.gitbook.io/anilist-apiv2-docs) - Update user data and download user data
+- [MyAnimeList API](https://myanimelist.net/apiconfig/references/api/v2) - MyAnimeList OAuth and tracking sync
 - [AniSkip API](https://api.aniskip.com/api-docs) - Get anime intro and outro timings
 - [AllAnime Content](https://allanime.to/) - Fetch anime url
+- [Senshi Project](https://senshi.to/) - Default provider with Vidcloud HLS streams and MAL-based catalog matching
+- [AniPub](https://anipub.xyz/) - Fast JSON catalog APIs with MegaPlay HLS streams
+- [AniNeko Content](https://anineko.to/) - Alternative provider with soft/hard sub stream selection
+- [Animepahe Content](https://animepahe.pw/) - Alternative provider for 1080p streams
 - [Jikan](https://jikan.moe/) - Get filler episode number
 
 ## Credits

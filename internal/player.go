@@ -1,19 +1,45 @@
 package internal
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/wraient/curd/internal/providers"
 )
 
+// Monotonic request id for mpv JSON IPC so we can ignore interleaved events.
+var mpvRequestID atomic.Int64
+
 var logFile = "debug.log"
+
+const mpvPlaybackPollInterval = 500 * time.Millisecond
+
+// This is not generic but we have MpvArgs in CurdConfig to add custom ones
+const defaultStreamReferrer = "https://allanime.day/"
+
+func streamReferrerForLink(link, provider string) string {
+	if strings.Contains(strings.ToLower(link), "tools.fast4speed.rsvp") {
+		return "https://allanime.to"
+	}
+	if referrer := providers.Referrer(provider); referrer != "" {
+		return referrer
+	}
+	return defaultStreamReferrer
+}
+
+// We should really handle this by Provider but keeping simple string here for now
 
 func getBundledMPVPath() (string, error) {
 	exePath, err := os.Executable()
@@ -146,22 +172,160 @@ func translateMPVArgsForIINA(mpvArgs []string) []string {
 	return translated
 }
 
+func isHTTPStreamLink(link string) bool {
+	trimmedLink := strings.ToLower(strings.TrimSpace(link))
+	return strings.HasPrefix(trimmedLink, "http://") || strings.HasPrefix(trimmedLink, "https://")
+}
+
+func hasMPVReferrerArg(args []string) bool {
+	normalizeReferrerFlag := func(arg string) string {
+		normalized := strings.ToLower(strings.TrimSpace(arg))
+		if strings.HasPrefix(normalized, "--mpv-") {
+			return "--" + strings.TrimPrefix(normalized, "--mpv-")
+		}
+		return normalized
+	}
+
+	for i, arg := range args {
+		normalizedArg := normalizeReferrerFlag(arg)
+
+		if strings.HasPrefix(normalizedArg, "--referrer=") || normalizedArg == "--referrer" {
+			return true
+		}
+
+		if strings.HasPrefix(normalizedArg, "--http-header-fields=") && strings.Contains(normalizedArg, "referer:") {
+			return true
+		}
+
+		if strings.HasPrefix(normalizedArg, "--http-header-fields-append=") && strings.Contains(normalizedArg, "referer:") {
+			return true
+		}
+
+		if (normalizedArg == "--http-header-fields" || normalizedArg == "--http-header-fields-append") && i+1 < len(args) {
+			nextArg := strings.ToLower(strings.TrimSpace(args[i+1]))
+			if strings.Contains(nextArg, "referer:") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func hasMPVSubtitleArg(args []string) bool {
+	for i, arg := range args {
+		lowerArg := strings.ToLower(strings.TrimSpace(arg))
+		if strings.HasPrefix(lowerArg, "--sub-file=") || lowerArg == "--sub-file" {
+			return true
+		}
+		if lowerArg == "--sub-files" && i+1 < len(args) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeReferrerValue(referrer string) string {
+	referrer = strings.TrimSpace(referrer)
+	if referrer == "" {
+		return ""
+	}
+
+	if !strings.Contains(referrer, "://") {
+		referrer = "https://" + referrer
+	}
+
+	parsed, err := url.Parse(referrer)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return referrer
+	}
+
+	if parsed.Path == "" {
+		parsed.Path = "/"
+	}
+
+	return parsed.String()
+}
+
+func normalizeReferrerArgs(args []string) []string {
+	normalized := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		switch {
+		case strings.HasPrefix(arg, "--referrer="):
+			normalized = append(normalized, "--referrer="+normalizeReferrerValue(strings.TrimPrefix(arg, "--referrer=")))
+		case arg == "--referrer" && i+1 < len(args):
+			normalized = append(normalized, arg, normalizeReferrerValue(args[i+1]))
+			i++
+		case strings.HasPrefix(arg, "--mpv-referrer="):
+			normalized = append(normalized, "--mpv-referrer="+normalizeReferrerValue(strings.TrimPrefix(arg, "--mpv-referrer=")))
+		case arg == "--mpv-referrer" && i+1 < len(args):
+			normalized = append(normalized, arg, normalizeReferrerValue(args[i+1]))
+			i++
+		default:
+			normalized = append(normalized, arg)
+		}
+	}
+
+	return normalized
+}
+
 func StartVideo(link string, args []string, title string, anime *Anime) (string, error) {
 	var command *exec.Cmd
 	var mpvSocketPath string
 	var err error
 
 	userConfig := GetGlobalConfig()
+	if userConfig == nil {
+		defaultConfig := PopulateConfig(map[string]string{})
+		userConfig = &defaultConfig
+	}
+	if anime == nil {
+		return "", fmt.Errorf("missing anime playback state")
+	}
+	if strings.TrimSpace(link) == "" {
+		return "", fmt.Errorf("empty video link")
+	}
 
 	// Add custom MPV arguments from config if they exist
 	if userConfig.MpvArgs != nil {
 		args = append(args, userConfig.MpvArgs...)
 	}
+	callerHasSubtitleArg := hasMPVSubtitleArg(args)
+
+	shouldSetDefaultReferrer := isHTTPStreamLink(link) && !hasMPVReferrerArg(args)
+	referrer := strings.TrimSpace(anime.Ep.StreamReferrer)
+	if referrer == "" && shouldSetDefaultReferrer {
+		referrer = streamReferrerForLink(link, CurrentAnimeProviderName(anime))
+	}
+	if referrer != "" && shouldSetDefaultReferrer {
+		args = append(args, fmt.Sprintf("--referrer=%s", referrer))
+	}
+	subtitleURL := strings.TrimSpace(anime.Ep.SubtitleURL)
+	if subtitleURL != "" && !callerHasSubtitleArg {
+		args = append(args, fmt.Sprintf("--sub-file=%s", subtitleURL))
+	}
+	args = normalizeReferrerArgs(args)
 
 	// Check if we have an existing socket and if MPV is still running
 	if anime.Ep.Player.SocketPath != "" && IsMPVRunning(anime.Ep.Player.SocketPath) {
 		// Reuse existing socket
 		mpvSocketPath = anime.Ep.Player.SocketPath
+
+		if shouldSetDefaultReferrer {
+			activeReferrer := strings.TrimSpace(anime.Ep.StreamReferrer)
+			if activeReferrer == "" {
+				activeReferrer = streamReferrerForLink(link, CurrentAnimeProviderName(anime))
+			}
+			if activeReferrer != "" {
+				_, referrerErr := MPVSendCommand(mpvSocketPath, []interface{}{"set_property", "referrer", activeReferrer})
+				if referrerErr != nil {
+					Log(fmt.Sprintf("Failed to set referrer property: %v", referrerErr))
+				}
+			}
+		}
 
 		// Load the new file in the existing MPV instance
 		command := []interface{}{"loadfile", link}
@@ -170,8 +334,15 @@ func StartVideo(link string, args []string, title string, anime *Anime) (string,
 			return "", fmt.Errorf("failed to load file in existing MPV instance: %w", err)
 		}
 
-		// Wait a brief moment for the file to load
-		time.Sleep(100 * time.Millisecond)
+		if subtitleURL != "" && !callerHasSubtitleArg {
+			if readyErr := waitForMPVFileReady(mpvSocketPath, link, 12*time.Second); readyErr != nil {
+				Log(fmt.Sprintf("Timed out waiting to attach subtitle track: %v", readyErr))
+			}
+			_, subErr := MPVSendCommand(mpvSocketPath, []interface{}{"sub-add", subtitleURL, "select"})
+			if subErr != nil {
+				Log(fmt.Sprintf("Failed to load subtitle track: %v", subErr))
+			}
+		}
 
 		// Update the window title
 		titleCommand := []interface{}{"set_property", "force-media-title", title}
@@ -227,11 +398,19 @@ func StartVideo(link string, args []string, title string, anime *Anime) (string,
 	}
 	mpvArgs = append(mpvArgs, link)
 
-	// Check for Android environment
-	amPath, err := exec.LookPath("am")
-	isAndroid := runtime.GOOS == "android" || (err == nil && amPath != "")
+	// Detect Android strictly from GOOS to avoid false positives from PATH binaries.
+	isAndroid := runtime.GOOS == "android"
 
 	if isAndroid {
+		amBinary, resolveErr := resolveExecutable("/system/bin/am")
+		if resolveErr != nil {
+			amBinary, resolveErr = resolveExecutable("am")
+			if resolveErr != nil {
+				CurdOut("Error: Android activity manager binary not found")
+				return "", fmt.Errorf("failed to locate android activity manager binary: %w", resolveErr)
+			}
+		}
+
 		// Only use MPV on Android via intent
 		cmdArgs := []string{
 			"start", "--user", "0",
@@ -240,7 +419,7 @@ func StartVideo(link string, args []string, title string, anime *Anime) (string,
 			"-n", "is.xyz.mpv/.MPVActivity",
 		}
 
-		command = exec.Command("am", cmdArgs...)
+		command = exec.Command(amBinary, cmdArgs...)
 		err = command.Start()
 		if err != nil {
 			CurdOut("Error: Failed to start android intent")
@@ -300,6 +479,177 @@ func StartVideo(link string, args []string, title string, anime *Anime) (string,
 	return mpvSocketPath, nil
 }
 
+// WaitForMPVPlaybackStart polls MPV until time-pos is available or the timeout elapses.
+// Returns true when playback has started, false when MPV exits or the timeout is reached.
+func WaitForMPVPlaybackStart(ipcSocketPath string, timeout time.Duration) bool {
+	if ipcSocketPath == "" || ipcSocketPath == "android-intent" {
+		return true
+	}
+
+	deadline := time.Now().Add(timeout)
+	Log(fmt.Sprintf("Waiting up to %s for MPV playback to start at %s", timeout, ipcSocketPath))
+
+	for time.Now().Before(deadline) {
+		timePos, err := MPVSendCommand(ipcSocketPath, []interface{}{"get_property", "time-pos"})
+		if err == nil && timePos != nil {
+			if _, ok := timePos.(float64); ok {
+				Log("MPV playback started")
+				return true
+			}
+		}
+
+		if err != nil {
+			if isMPVConnectionGoneError(err) {
+				Log("MPV exited before playback could start")
+				return false
+			}
+		}
+
+		time.Sleep(mpvPlaybackPollInterval)
+	}
+
+	Log(fmt.Sprintf("MPV playback did not start within %s", timeout))
+	return false
+}
+
+// StartVideoWithProviderFallback starts the current episode links and, if MPV never
+// begins playback, retries other providers. Preferred SubOrDub is exhausted first;
+// only then is an alternate sub/dub mode offered with an explicit user prompt.
+func StartVideoWithProviderFallback(userCurdConfig *CurdConfig, anime *Anime, title string) string {
+	if userCurdConfig == nil || anime == nil {
+		Log("StartVideoWithProviderFallback: missing config or anime")
+		exitWithRestore(1)
+	}
+	if strings.TrimSpace(title) == "" {
+		title = fmt.Sprintf("%s - Episode %d", GetAnimeName(*anime), anime.Ep.Number)
+	}
+
+	var excludedProviders []string
+	activeMode := normalizeTranslationType(userCurdConfig.SubOrDub)
+	alternateModeOffered := false
+
+	for {
+		if len(anime.Ep.Links) == 0 {
+			CurdOut("No episode links found")
+			exitWithRestore(1)
+		}
+
+		mpvSocketPath, err := StartVideo(PrioritizeLink(anime.Ep.Links), []string{}, title, anime)
+		if err != nil {
+			Log("Failed to start mpv")
+			exitWithRestore(1)
+		}
+
+		if mpvSocketPath == "android-intent" || WaitForMPVPlaybackStart(mpvSocketPath, MpvPlaybackStartTimeoutDuration(userCurdConfig)) {
+			return mpvSocketPath
+		}
+
+		failedProvider := CurrentAnimeProviderName(anime)
+		playbackTimeout := MpvPlaybackStartTimeoutDuration(userCurdConfig)
+		Log(fmt.Sprintf("Playback did not start with provider %s/%s within %s", failedProvider, activeMode, playbackTimeout))
+		CurdOut(fmt.Sprintf("Playback failed to start with %s. Trying another provider...", failedProvider))
+
+		if mpvSocketPath != "" {
+			ExitMPV(mpvSocketPath)
+		}
+		anime.Ep.Player.SocketPath = ""
+		excludedProviders = append(excludedProviders, failedProvider)
+
+		// Prefer remaining providers in the active (initially preferred) audio mode.
+		episodeResult, err := ResolveEpisodeURLExcludingProvidersMode(*userCurdConfig, anime, anime.Ep.Number, excludedProviders, activeMode)
+		if err == nil && len(episodeResult.Links) > 0 {
+			anime.Ep.Links = episodeResult.Links
+			applyStreamPlaybackHints(anime, anime.Ep.Links, episodeResult.LinkHints)
+			Log(fmt.Sprintf("Retrying playback with %s/%s: %+v", episodeResult.ProviderName, episodeResult.Mode, episodeResult.Links))
+			CurdOut(fmt.Sprintf("Retrying with %s...", episodeResult.ProviderName))
+			continue
+		}
+
+		// Preferred/active mode exhausted — offer alternate sub/dub once, with a prompt.
+		if !alternateModeOffered && activeMode == normalizeTranslationType(userCurdConfig.SubOrDub) {
+			alternateModeOffered = true
+			episodeResult, err = ResolveEpisodeURLAlternateModeWithPrompt(*userCurdConfig, anime, anime.Ep.Number, nil)
+			if err == nil && len(episodeResult.Links) > 0 {
+				// Alternate mode gets a fresh provider pass, including ones that failed preferred.
+				excludedProviders = nil
+				activeMode = normalizeTranslationType(episodeResult.Mode)
+				anime.Ep.Links = episodeResult.Links
+				applyStreamPlaybackHints(anime, anime.Ep.Links, episodeResult.LinkHints)
+				Log(fmt.Sprintf("Retrying playback with %s/%s after audio fallback: %+v", episodeResult.ProviderName, episodeResult.Mode, episodeResult.Links))
+				CurdOut(fmt.Sprintf("Retrying with %s (%s)...", episodeResult.ProviderName, episodeResult.Mode))
+				continue
+			}
+		}
+
+		CurdOut("No alternative provider could start playback for this episode.")
+		if err != nil {
+			Log(fmt.Sprintf("Provider fallback failed: %v", err))
+		}
+		exitWithRestore(1)
+	}
+}
+
+func isMPVConnectionGoneError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := strings.ToLower(err.Error())
+	goneErrors := []string{
+		"connect: connection refused",
+		"connect: no such file or directory",
+		"cannot find the file specified",
+		"pipe has been ended",
+		"pipe is being closed",
+		"no process is on the other end of the pipe",
+	}
+	for _, goneError := range goneErrors {
+		if strings.Contains(errMsg, goneError) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMPVPropertyUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "property unavailable")
+}
+
+// PlaybackLossAction tells the monitor how to react when time-pos/has-playback fails.
+type PlaybackLossAction int
+
+const (
+	// PlaybackLossWait: transient gap (playlist switch, demuxer reload). Keep monitoring.
+	PlaybackLossWait PlaybackLossAction = iota
+	// PlaybackLossComplete: episode reached the completion threshold (or MPV quit after enough watch).
+	PlaybackLossComplete
+	// PlaybackLossExit: user quit MPV before the completion threshold.
+	PlaybackLossExit
+)
+
+// ClassifyPlaybackLoss decides what to do when the monitor loses time-pos.
+// Critical: "property unavailable" while MPV is still running is normal during
+// playlist episode switches and must NOT exit curd. Only a dead MPV process
+// (or a finished episode past the completion %) should end the session.
+func ClassifyPlaybackLoss(socketPath string, started bool, percentageWatched float64, completeThreshold int) PlaybackLossAction {
+	if !started {
+		return PlaybackLossWait
+	}
+	if MPVPlaylistIsSwitching() {
+		return PlaybackLossWait
+	}
+	if int(percentageWatched) >= completeThreshold {
+		return PlaybackLossComplete
+	}
+	// MPV still open with incomplete watch → wait (playlist jump, pause, buffer).
+	if socketPath != "" && IsMPVRunning(socketPath) {
+		return PlaybackLossWait
+	}
+	return PlaybackLossExit
+}
+
 // Helper function to join args with a space
 func joinArgs(args []string) string {
 	result := ""
@@ -324,64 +674,195 @@ func MPVSendCommand(ipcSocketPath string, command []interface{}) (interface{}, e
 			Log(fmt.Sprintf("Retrying MPV command, attempt %d/%d", attempt+1, maxRetries))
 		}
 
-		conn, err := connectToPipe(ipcSocketPath)
-		if err != nil {
-			lastErr = err
-			Log(fmt.Sprintf("Connect error (attempt %d/%d): %v", attempt+1, maxRetries, err))
-			continue // Try again
+		data, err := mpvSendCommandOnce(ipcSocketPath, command)
+		if err == nil {
+			return data, nil
 		}
-		defer conn.Close()
-
-		commandStr, err := json.Marshal(map[string]interface{}{
-			"command": command,
-		})
-		if err != nil {
-			return nil, err // Don't retry on JSON marshalling errors
+		lastErr = err
+		// property unavailable is a valid answer — don't spin retries on it
+		if isMPVPropertyUnavailableError(err) {
+			return nil, err
 		}
+		Log(fmt.Sprintf("MPV command error (attempt %d/%d): %v", attempt+1, maxRetries, err))
+	}
 
-		// Send the command
-		_, err = conn.Write(append(commandStr, '\n'))
-		if err != nil {
-			lastErr = err
-			Log(fmt.Sprintf("Write error (attempt %d/%d): %v", attempt+1, maxRetries, err))
-			continue // Try again
+	return nil, fmt.Errorf("command failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+func mpvSendCommandOnce(ipcSocketPath string, command []interface{}) (interface{}, error) {
+	conn, err := connectToPipe(ipcSocketPath)
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close()
+
+	reqID := mpvRequestID.Add(1)
+	payload, err := json.Marshal(map[string]interface{}{
+		"command":    command,
+		"request_id": reqID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if deadline, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		_ = deadline.SetReadDeadline(time.Now().Add(3 * time.Second))
+	}
+	if deadline, ok := conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = deadline.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	}
+
+	if _, err := conn.Write(append(payload, '\n')); err != nil {
+		return nil, fmt.Errorf("write: %w", err)
+	}
+
+	// Read newline-delimited JSON; skip event messages until our request_id matches.
+	reader := bufio.NewReader(conn)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if d, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = d.SetReadDeadline(time.Now().Add(2 * time.Second))
 		}
-
-		// Receive the response with timeout
-		buf := make([]byte, 4096)
-		// Set read deadline for 1 second
-		if deadline, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
-			deadline.SetReadDeadline(time.Now().Add(1 * time.Second))
-		}
-
-		n, err := conn.Read(buf)
+		line, err := reader.ReadBytes('\n')
 		if err != nil {
-			lastErr = err
-			Log(fmt.Sprintf("Read error (attempt %d/%d): %v", attempt+1, maxRetries, err))
-			continue // Try again
+			if err == io.EOF && len(line) == 0 {
+				return nil, fmt.Errorf("read: %w", err)
+			}
+			if len(line) == 0 {
+				return nil, fmt.Errorf("read: %w", err)
+			}
+			// fall through with partial line if any
+		}
+		line = bytesTrimSpace(line)
+		if len(line) == 0 {
+			continue
 		}
 
 		var response map[string]interface{}
-		if err := json.Unmarshal(buf[:n], &response); err != nil {
-			lastErr = err
-			Log(fmt.Sprintf("JSON parse error (attempt %d/%d): %v", attempt+1, maxRetries, err))
-			continue // Try again
+		if err := json.Unmarshal(line, &response); err != nil {
+			// Multi-object garbage — try first line only already; skip bad line
+			continue
 		}
 
-		// Success!
-		if data, exists := response["data"]; exists {
-			return data, nil
+		// Skip pure events (property-change, etc.) that have no matching request_id.
+		if rid, ok := response["request_id"]; ok {
+			if idNum, ok := asInt64(rid); !ok || idNum != reqID {
+				continue
+			}
+		} else if _, isEvent := response["event"]; isEvent {
+			continue
 		}
-		return nil, nil
+
+		// Response without request_id but with error/data — accept as command reply
+		// only when it looks like a command result (has "error" field).
+		if _, hasErr := response["error"]; !hasErr {
+			if _, isEvent := response["event"]; isEvent {
+				continue
+			}
+		}
+
+		return mpvResponseData(response)
+	}
+	return nil, fmt.Errorf("timed out waiting for mpv response to request_id=%d", reqID)
+}
+
+func bytesTrimSpace(b []byte) []byte {
+	return []byte(strings.TrimSpace(string(b)))
+}
+
+func asInt64(v interface{}) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case json.Number:
+		i, err := n.Int64()
+		return i, err == nil
+	default:
+		return 0, false
+	}
+}
+
+
+func mpvResponseData(response map[string]interface{}) (interface{}, error) {
+	if errorValue, exists := response["error"]; exists {
+		errorText, ok := errorValue.(string)
+		if !ok {
+			return nil, fmt.Errorf("mpv returned non-string error field: %T", errorValue)
+		}
+		if errorText != "" && errorText != "success" {
+			return nil, fmt.Errorf("mpv command error: %s", errorText)
+		}
 	}
 
-	// All retries failed
-	return nil, fmt.Errorf("command failed after %d attempts: %w", maxRetries, lastErr)
+	if data, exists := response["data"]; exists {
+		return data, nil
+	}
+	return nil, nil
 }
 
 func SeekMPV(ipcSocketPath string, time int) (interface{}, error) {
 	command := []interface{}{"seek", time, "absolute"}
 	return MPVSendCommand(ipcSocketPath, command)
+}
+
+type mpvCommandSender func(string, []interface{}) (interface{}, error)
+
+func waitForMPVFileReady(ipcSocketPath, expectedPath string, timeout time.Duration) error {
+	return waitForMPVFileReadyWith(MPVSendCommand, ipcSocketPath, expectedPath, timeout, 100*time.Millisecond)
+}
+
+func waitForMPVFileReadyWith(send mpvCommandSender, ipcSocketPath, expectedPath string, timeout, pollInterval time.Duration) error {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	if pollInterval <= 0 {
+		pollInterval = 100 * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		pathValue, pathErr := send(ipcSocketPath, []interface{}{"get_property", "path"})
+		path, _ := pathValue.(string)
+		pathReady := pathErr == nil && strings.TrimSpace(path) != ""
+		if pathReady && expectedPath != "" {
+			pathReady = path == expectedPath
+		}
+		if pathReady {
+			if duration, durationErr := send(ipcSocketPath, []interface{}{"get_property", "duration"}); durationErr == nil && mpvNumber(duration) > 0 {
+				return nil
+			}
+			if position, positionErr := send(ipcSocketPath, []interface{}{"get_property", "time-pos"}); positionErr == nil && mpvNumber(position) >= 0 {
+				return nil
+			}
+		}
+		if pathErr != nil {
+			lastErr = pathErr
+		}
+		time.Sleep(pollInterval)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("MPV file did not become ready: %w", lastErr)
+	}
+	return fmt.Errorf("MPV file did not become ready before timeout")
+}
+
+func mpvNumber(value interface{}) float64 {
+	switch number := value.(type) {
+	case float64:
+		return number
+	case float32:
+		return float64(number)
+	case int:
+		return float64(number)
+	case int64:
+		return float64(number)
+	default:
+		return -1
+	}
 }
 
 func GetMPVPausedStatus(ipcSocketPath string) (bool, error) {
@@ -629,7 +1110,11 @@ func StartMPVEventListener(ipcSocketPath string, eventCallback func(string, inte
 
 				// Handle both events and property changes
 				if event, exists := response["event"]; exists {
-					eventType := event.(string)
+					eventType, ok := event.(string)
+					if !ok {
+						Log(fmt.Sprintf("MPV event field is not a string: %T", event))
+						continue
+					}
 					Log(fmt.Sprintf("Event type detected: %s", eventType))
 
 					// Handle specific MPV events
@@ -655,7 +1140,11 @@ func StartMPVEventListener(ipcSocketPath string, eventCallback func(string, inte
 					case "property-change":
 						if name, exists := response["name"]; exists {
 							if data, exists := response["data"]; exists {
-								propertyName := name.(string)
+								propertyName, ok := name.(string)
+								if !ok {
+									Log(fmt.Sprintf("Property change name is not a string: %T", name))
+									continue
+								}
 								Log(fmt.Sprintf("MPV PROPERTY CHANGE EVENT - %s: %v", propertyName, data))
 
 								// Call the callback with the event details
